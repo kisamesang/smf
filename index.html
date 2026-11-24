@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="th" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KS0567 Cloud Smart Farm</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232322; --border: rgba(255,255,255,0.10);
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781; --grid: #2c2c2a; --axis: #383835;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --accent: #0ca30c; --off: #383835;
+    --s-temp: #d95926; --s-hum: #3987e5; --s-soil: #199e70; --s-light: #c98500;
+    --s-water: #9085e9; --s-rain: #d55181; --s-dist: #e66767;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f0efec; --border: rgba(11,11,11,0.10);
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7;
+    --accent: #008300; --off: #c3c2b7;
+    --s-temp: #eb6834; --s-hum: #2a78d6; --s-soil: #1baf7a; --s-light: #eda100;
+    --s-water: #6250d6; --s-rain: #e87ba4; --s-dist: #e34948;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: 'Prompt', system-ui, sans-serif; background: var(--page); color: var(--ink); margin: 0; padding: 20px; }
+  .container { max-width: 1200px; margin: auto; }
+  header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 20px; }
+  h1 { margin: 0; font-size: 1.45rem; font-weight: 600; }
+  h2 { font-size: 1rem; font-weight: 500; margin: 0 0 12px; color: var(--ink-2); }
+  .sub { color: var(--muted); font-size: .85rem; }
+  .hdr-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; font-size: .82rem; background: var(--surface); border: 1px solid var(--border); color: var(--ink-2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); }
+  .pill.online .dot { background: var(--good); }
+  .pill.wait .dot { background: var(--warning); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+  .section { margin-bottom: 20px; }
+
+  /* sensor tiles */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 12px; }
+  .tile { cursor: pointer; position: relative; transition: border-color .15s; }
+  .tile:hover { border-color: var(--muted); }
+  .tile.sel { border-color: var(--ink-2); }
+  .tile .t-head { display: flex; justify-content: space-between; align-items: center; font-size: .82rem; color: var(--ink-2); }
+  .tile .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 6px; }
+  .tile .val { font-size: 1.9rem; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tile .unit { font-size: .85rem; color: var(--ink-2); margin-left: 3px; font-weight: 400; }
+  .tile canvas { width: 100% !important; height: 34px !important; margin-top: 6px; }
+  .tile .meta { font-size: .72rem; color: var(--muted); margin-top: 4px; display: flex; justify-content: space-between; }
+  .badge { font-size: .7rem; padding: 2px 7px; border-radius: 6px; background: var(--surface-2); color: var(--ink-2); }
+  .badge.warn { background: var(--warning); color: #0b0b0b; }
+  .badge.crit { background: var(--critical); color: #fff; }
+  .badge.ok { background: transparent; color: var(--muted); }
+
+  /* main chart */
+  .chart-wrap { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .seg { display: inline-flex; background: var(--surface-2); border-radius: 9px; padding: 3px; gap: 2px; flex-wrap: wrap; }
+  .seg button { background: transparent; color: var(--ink-2); border: none; padding: 6px 11px; border-radius: 7px; font: inherit; font-size: .82rem; cursor: pointer; }
+  .seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--border); }
+  .chart-title { font-size: 1.05rem; font-weight: 500; }
+  .chart-stats { display: flex; gap: 18px; font-size: .8rem; color: var(--muted); flex-wrap: wrap; }
+  .chart-stats b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .chart-box { position: relative; height: 300px; }
+
+  /* controls */
+  .ctrl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .ctrl { display: flex; flex-direction: column; gap: 12px; }
+  .ctrl-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .ctrl-name { display: flex; align-items: center; gap: 10px; font-weight: 500; }
+  .ico { width: 38px; height: 38px; border-radius: 10px; background: var(--surface-2); display: grid; place-items: center; font-size: 1.15rem; }
+  .ctrl-state { font-size: .75rem; color: var(--muted); }
+  .switch { position: relative; width: 50px; height: 28px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: var(--off); border-radius: 999px; cursor: pointer; transition: .2s; }
+  .slider::before { content: ""; position: absolute; width: 22px; height: 22px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(22px); }
+  .switch input:focus-visible + .slider { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .btn { font: inherit; font-size: .82rem; font-weight: 500; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); cursor: pointer; transition: .15s; }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .btn.danger { background: var(--critical); color: #fff; border-color: transparent; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  input[type=range] { flex: 1; accent-color: var(--accent); min-width: 100px; }
+  .rv { font-variant-numeric: tabular-nums; font-size: .85rem; color: var(--ink-2); min-width: 44px; text-align: right; }
+  label.small { font-size: .78rem; color: var(--ink-2); }
+
+  /* auto settings */
+  .th-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px 22px; }
+  .th-item { display: flex; flex-direction: column; gap: 4px; }
+  .th-item .row { flex-wrap: nowrap; }
+
+  /* log */
+  .log { max-height: 220px; overflow-y: auto; font-size: .8rem; font-family: ui-monospace, Consolas, monospace; color: var(--ink-2); }
+  .log div { padding: 4px 0; border-bottom: 1px solid var(--grid); }
+  .log .tm { color: var(--muted); margin-right: 8px; }
+  .log .in { color: var(--good); } .log .out { color: var(--s-hum); } .log .al { color: var(--serious); }
+
+  .two { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+  @media (max-width: 860px) { .two { grid-template-columns: 1fr; } .chart-box { height: 240px; } }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(80px); background: var(--surface-2); color: var(--ink); border: 1px solid var(--border); padding: 10px 16px; border-radius: 10px; font-size: .85rem; transition: .25s; opacity: 0; z-index: 9; }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  table.data { width: 100%; border-collapse: collapse; font-size: .8rem; font-variant-numeric: tabular-nums; }
+  table.data th, table.data td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--grid); }
+  table.data th:first-child, table.data td:first-child { text-align: left; }
+  table.data th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--surface); }
+  .tbl-wrap { max-height: 300px; overflow: auto; }
+  .hidden { display: none !important; }
+  input[type=text] { font: inherit; font-size: .82rem; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div>
+      <h1>🌱 KS0567 Cloud Smart Farm</h1>
+      <div class="sub">ควบคุมผ่าน Cloud MQTT · อัปเดตล่าสุด <span id="last-upd">—</span></div>
+    </div>
+    <div class="hdr-right">
+      <span id="conn" class="pill"><span class="dot"></span><span id="conn-txt">กำลังเชื่อมต่อ...</span></span>
+      <span id="dev" class="pill wait"><span class="dot"></span><span id="dev-txt">รอข้อมูลจากบอร์ด</span></span>
+      <button class="btn" id="btn-demo" onclick="toggleDemo()">▶ โหมดจำลอง</button>
+      <button class="btn" onclick="toggleTheme()" title="สลับธีม">◐</button>
+    </div>
+  </header>
+
+  <!-- Sensor tiles -->
+  <div class="section">
+    <div class="tiles" id="tiles"></div>
+  </div>
+
+  <!-- Main chart -->
+  <div class="section card">
+    <div class="toolbar">
+      <div>
+        <div class="chart-title" id="chart-title">อุณหภูมิอากาศ</div>
+        <div class="chart-stats">
+          <span>ล่าสุด <b id="st-now">—</b></span>
+          <span>ต่ำสุด <b id="st-min">—</b></span>
+          <span>สูงสุด <b id="st-max">—</b></span>
+          <span>เฉลี่ย <b id="st-avg">—</b></span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="seg" id="range-seg">
+          <button data-r="300">5 นาที</button>
+          <button data-r="1800" class="on">30 นาที</button>
+          <button data-r="3600">1 ชม.</button>
+          <button data-r="21600">6 ชม.</button>
+          <button data-r="86400">24 ชม.</button>
+        </div>
+        <div class="seg">
+          <button id="v-chart" class="on" onclick="setView('chart')">กราฟ</button>
+          <button id="v-table" onclick="setView('table')">ตาราง</button>
+        </div>
+        <button class="btn" onclick="exportCSV()">⬇ CSV</button>
+        <button class="btn" onclick="clearHistory()">ล้าง</button>
+      </div>
+    </div>
+    <div class="seg" id="sensor-seg" style="margin-bottom:12px"></div>
+    <div class="chart-box" id="chart-box"><canvas id="main-chart" aria-label="กราฟข้อมูลเซนเซอร์" role="img"></canvas></div>
+    <div class="tbl-wrap hidden" id="tbl-box"><table class="data" id="tbl"></table></div>
+  </div>
+
+  <!-- Controls -->
+  <div class="section">
+    <h2>อุปกรณ์ควบคุม</h2>
+    <div class="ctrl-grid">
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">💡</span><div>ไฟส่องสว่าง LED<div class="ctrl-state" id="s-led">ปิด</div></div></div>
+          <label class="switch"><input type="checkbox" id="sw-led" onchange="sendCmd('led:'+(this.checked?'on':'off'))"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">🌀</span><div>พัดลมระบายอากาศ<div class="ctrl-state" id="s-fan">ปิด</div></div></div>
+          <label class="switch"><input type="checkbox" id="sw-fan" onchange="sendCmd('fan:'+(this.checked?'on':'off'))"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">💧</span><div>ปั๊มรดน้ำ<div class="ctrl-state" id="s-pump">ปิด</div></div></div>
+          <label class="switch"><input type="checkbox" id="sw-pump" onchange="sendCmd('pump:'+(this.checked?'on':'off'))"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <label class="small">รดน้ำแบบตั้งเวลา</label>
+          <input type="range" id="pump-sec" min="1" max="30" value="3" oninput="rv('pump-sec','pump-sec-v',' วิ')">
+          <span class="rv" id="pump-sec-v">3 วิ</span>
+          <button class="btn primary" onclick="sendCmd('water:'+val('pump-sec'))">รดน้ำ</button>
+        </div>
+      </div>
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">🥣</span><div>ฝากล่องอาหาร (Servo)<div class="ctrl-state" id="s-servo">—</div></div></div>
+          <div class="row">
+            <button class="btn" onclick="sendCmd('feed:open')">เปิด</button>
+            <button class="btn" onclick="sendCmd('feed:close')">ปิด</button>
+          </div>
+        </div>
+        <div class="row">
+          <label class="small">มุม</label>
+          <input type="range" id="servo-ang" min="0" max="180" value="160" oninput="rv('servo-ang','servo-ang-v','°')" onchange="sendCmd('servo:'+val('servo-ang'))">
+          <span class="rv" id="servo-ang-v">160°</span>
+        </div>
+      </div>
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">🔔</span><div>ลำโพง Buzzer<div class="ctrl-state">ส่งเสียงเตือน/ทดสอบ</div></div></div>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="sendCmd('buzzer')">บี๊บ</button>
+          <button class="btn" onclick="sendCmd('alarm')">ไซเรน</button>
+          <button class="btn" onclick="sendCmd('music')">เพลง</button>
+          <button class="btn" onclick="sendCmd('buzzer:off')">หยุด</button>
+        </div>
+      </div>
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">🛡️</span><div>สัญญาณกันขโมย (PIR)<div class="ctrl-state" id="s-alarm">ปิดการเฝ้าระวัง</div></div></div>
+          <label class="switch"><input type="checkbox" id="sw-alarm" onchange="sendCmd('guard:'+(this.checked?'on':'off'))"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="card ctrl">
+        <div class="ctrl-top">
+          <div class="ctrl-name"><span class="ico">🤖</span><div>โหมดอัตโนมัติ<div class="ctrl-state" id="s-auto">ปิด — ควบคุมด้วยมือ</div></div></div>
+          <label class="switch"><input type="checkbox" id="sw-auto" onchange="sendCmd('auto:'+(this.checked?'on':'off'))"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <button class="btn danger" onclick="allOff()">⏻ ปิดอุปกรณ์ทั้งหมด</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Automation thresholds + log -->
+  <div class="section two">
+    <div class="card">
+      <h2>ตั้งค่าโหมดอัตโนมัติ &amp; แจ้งเตือน</h2>
+      <div class="th-grid">
+        <div class="th-item">
+          <label class="small">💧 รดน้ำเมื่อความชื้นดินต่ำกว่า</label>
+          <div class="row"><input type="range" id="th-soil" min="0" max="100" value="30" oninput="rv('th-soil','th-soil-v','%')"><span class="rv" id="th-soil-v">30%</span></div>
+        </div>
+        <div class="th-item">
+          <label class="small">🌀 เปิดพัดลมเมื่ออุณหภูมิสูงกว่า</label>
+          <div class="row"><input type="range" id="th-temp" min="15" max="45" value="32" oninput="rv('th-temp','th-temp-v','°C')"><span class="rv" id="th-temp-v">32°C</span></div>
+        </div>
+        <div class="th-item">
+          <label class="small">💡 เปิดไฟเมื่อแสงต่ำกว่า</label>
+          <div class="row"><input type="range" id="th-light" min="0" max="100" value="20" oninput="rv('th-light','th-light-v','%')"><span class="rv" id="th-light-v">20%</span></div>
+        </div>
+        <div class="th-item">
+          <label class="small">🪣 เตือนเมื่อน้ำในถังต่ำกว่า</label>
+          <div class="row"><input type="range" id="th-water" min="0" max="100" value="15" oninput="rv('th-water','th-water-v','%')"><span class="rv" id="th-water-v">15%</span></div>
+        </div>
+        <div class="th-item">
+          <label class="small">🌧️ เตือนฝนตกเมื่อค่าเกิน</label>
+          <div class="row"><input type="range" id="th-rain" min="0" max="100" value="40" oninput="rv('th-rain','th-rain-v','%')"><span class="rv" id="th-rain-v">40%</span></div>
+        </div>
+        <div class="th-item">
+          <label class="small">🥣 เปิดฝาอาหารเมื่อสัตว์อยู่ใกล้กว่า</label>
+          <div class="row"><input type="range" id="th-dist" min="2" max="30" value="7" oninput="rv('th-dist','th-dist-v',' cm')"><span class="rv" id="th-dist-v">7 cm</span></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn primary" onclick="sendThresholds()">ส่งค่าไปที่บอร์ด</button>
+        <span class="sub">ค่าเหล่านี้ใช้ทั้งเป็นเกณฑ์ Auto บนบอร์ด และเส้นเกณฑ์บนกราฟ</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="toolbar" style="margin-bottom:6px"><h2 style="margin:0">บันทึกเหตุการณ์</h2>
+        <div class="row"><input type="text" id="topic-base" style="width:150px" title="MQTT topic prefix"><button class="btn" onclick="changeTopic()">เปลี่ยน</button></div>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ================= CONFIG ================= */
+const BROKER = "wss://broker.emqx.io:8084/mqtt";
+let TOPIC_BASE = localStorage.getItem("sf_topic") || "sbt_smartfarm_01";
+const T = () => ({ status: TOPIC_BASE + "/status", control: TOPIC_BASE + "/control" });
+const HIST_KEY = "sf_history_v2";
+const MAX_POINTS = 6000;
+
+/* sensor definitions — color follows the sensor, never its position */
+const SENSORS = [
+  { key: "temp",  name: "อุณหภูมิอากาศ",     unit: "°C", icon: "🌡️", color: "--s-temp",  min: 0, max: 50,  th: "th-temp",  thDir: "above" },
+  { key: "hum",   name: "ความชื้นอากาศ",     unit: "%",  icon: "💨", color: "--s-hum",   min: 0, max: 100 },
+  { key: "soil",  name: "ความชื้นในดิน",      unit: "%",  icon: "🌱", color: "--s-soil",  min: 0, max: 100, th: "th-soil",  thDir: "below" },
+  { key: "light", name: "ความเข้มแสง",        unit: "%",  icon: "☀️", color: "--s-light", min: 0, max: 100, th: "th-light", thDir: "below" },
+  { key: "water", name: "ระดับน้ำในถัง",      unit: "%",  icon: "🪣", color: "--s-water", min: 0, max: 100, th: "th-water", thDir: "below" },
+  { key: "rain",  name: "น้ำฝน/ไอน้ำ",        unit: "%",  icon: "🌧️", color: "--s-rain",  min: 0, max: 100, th: "th-rain",  thDir: "above" },
+  { key: "dist",  name: "ระยะ (Ultrasonic)", unit: "cm", icon: "📏", color: "--s-dist",  min: 0, max: 100, th: "th-dist",  thDir: "below" },
+];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* ================= STATE ================= */
+let hist = [];
+try { hist = JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); } catch (e) { hist = []; }
+let selected = "temp", rangeSec = 1800, view = "chart", lastMsg = 0, demo = null, lastState = {};
+const sparks = {};
+
+/* ================= TILES ================= */
+const tilesEl = document.getElementById("tiles");
+const sensorSeg = document.getElementById("sensor-seg");
+SENSORS.forEach(s => {
+  tilesEl.insertAdjacentHTML("beforeend", `
+    <div class="card tile" id="tile-${s.key}" onclick="selectSensor('${s.key}')" tabindex="0">
+      <div class="t-head"><span><span class="sw" style="background:var(${s.color})"></span>${s.name}</span><span id="bd-${s.key}" class="badge ok">${s.icon}</span></div>
+      <div class="val"><span id="v-${s.key}">--</span><span class="unit">${s.unit}</span></div>
+      <canvas id="sp-${s.key}"></canvas>
+      <div class="meta"><span id="d-${s.key}">&nbsp;</span><span id="r-${s.key}"></span></div>
+    </div>`);
+  sensorSeg.insertAdjacentHTML("beforeend", `<button data-k="${s.key}">${s.icon} ${s.name}</button>`);
+});
+// PIR tile (binary)
+tilesEl.insertAdjacentHTML("beforeend", `
+  <div class="card tile" style="cursor:default">
+    <div class="t-head"><span>การเคลื่อนไหว (PIR)</span><span class="badge ok">🚶</span></div>
+    <div class="val" id="v-pir" style="font-size:1.35rem;margin-top:10px">--</div>
+    <div class="meta" style="margin-top:14px"><span id="pir-last">ยังไม่พบ</span></div>
+  </div>`);
+sensorSeg.addEventListener("click", e => { const b = e.target.closest("button"); if (b) selectSensor(b.dataset.k); });
+document.getElementById("range-seg").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  rangeSec = +b.dataset.r;
+  document.querySelectorAll("#range-seg button").forEach(x => x.classList.toggle("on", x === b));
+  renderMain();
+});
+
+function makeSpark(s) {
+  const ctx = document.getElementById("sp-" + s.key);
+  sparks[s.key] = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: [{ data: [], borderColor: css(s.color), borderWidth: 2, pointRadius: 0, tension: .35, fill: true,
+      backgroundColor: hexA(css(s.color), .15) }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, events: [],
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      scales: { x: { display: false }, y: { display: false } } }
+  });
+}
+
+/* ================= MAIN CHART ================= */
+const thresholdPlugin = {
+  id: "threshold",
+  afterDatasetsDraw(chart) {
+    const t = chart.options.plugins.threshold; if (t == null || t.value == null) return;
+    const { ctx, chartArea: a, scales: { y } } = chart;
+    const py = y.getPixelForValue(t.value); if (py < a.top || py > a.bottom) return;
+    ctx.save(); ctx.strokeStyle = css("--serious"); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(a.left, py); ctx.lineTo(a.right, py); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle = css("--ink-2"); ctx.font = "12px Prompt, sans-serif";
+    ctx.textAlign = "right"; ctx.fillText("เกณฑ์ " + t.value + t.unit, a.right - 4, py - 6); ctx.restore();
+  }
+};
+const crosshair = {
+  id: "crosshair",
+  afterDraw(chart) {
+    const act = chart.tooltip?.getActiveElements?.(); if (!act || !act.length) return;
+    const { ctx, chartArea: a } = chart; const x = act[0].element.x;
+    ctx.save(); ctx.strokeStyle = css("--axis"); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom); ctx.stroke(); ctx.restore();
+  }
+};
+let mainChart;
+function buildMain() {
+  if (mainChart) mainChart.destroy();
+  mainChart = new Chart(document.getElementById("main-chart"), {
+    type: "line",
+    data: { datasets: [{ data: [], borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, pointHoverBorderWidth: 2,
+      pointHoverBorderColor: css("--surface"), tension: .3, fill: true, spanGaps: 60000 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 250 }, parsing: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        threshold: {},
+        tooltip: {
+          backgroundColor: css("--surface-2"), titleColor: css("--ink"), bodyColor: css("--ink-2"),
+          borderColor: css("--border"), borderWidth: 1, padding: 10, displayColors: false,
+          titleFont: { family: "Prompt" }, bodyFont: { family: "Prompt" },
+          callbacks: {
+            title: it => new Date(it[0].parsed.x).toLocaleString("th-TH"),
+            label: it => { const s = sensorByKey(selected); return s.name + ": " + fmt(it.parsed.y) + " " + s.unit; }
+          }
+        }
+      },
+      scales: {
+        x: { type: "linear", grid: { color: css("--grid") }, border: { color: css("--axis") },
+             ticks: { color: css("--muted"), maxTicksLimit: 7, callback: v => fmtTime(v) } },
+        y: { grid: { color: css("--grid") }, border: { display: false }, ticks: { color: css("--muted"), maxTicksLimit: 6 } }
+      }
+    },
+    plugins: [thresholdPlugin, crosshair]
+  });
+}
+
+function renderMain() {
+  const s = sensorByKey(selected); const color = css(s.color);
+  const now = Date.now(), from = now - rangeSec * 1000;
+  const pts = hist.filter(h => h.t >= from && h[s.key] != null).map(h => ({ x: h.t, y: h[s.key] }));
+  const data = downsample(pts, 500);
+  const ds = mainChart.data.datasets[0];
+  ds.data = data; ds.borderColor = color; ds.pointHoverBackgroundColor = color;
+  const g = mainChart.ctx.createLinearGradient(0, 0, 0, mainChart.height || 300);
+  g.addColorStop(0, hexA(color, .28)); g.addColorStop(1, hexA(color, 0));
+  ds.backgroundColor = g;
+  mainChart.options.scales.x.min = from; mainChart.options.scales.x.max = now;
+  if (s.key === "temp" || s.key === "dist") { delete mainChart.options.scales.y.min; delete mainChart.options.scales.y.max; mainChart.options.scales.y.suggestedMin = s.key === "temp" ? 15 : 0; mainChart.options.scales.y.suggestedMax = s.key === "temp" ? 40 : 30; }
+  else { mainChart.options.scales.y.min = 0; mainChart.options.scales.y.max = 100; }
+  mainChart.options.plugins.threshold = s.th ? { value: +val(s.th), unit: s.unit } : {};
+  mainChart.update("none");
+
+  document.getElementById("chart-title").textContent = s.icon + " " + s.name;
+  const ys = pts.map(p => p.y);
+  const set = (id, v) => document.getElementById(id).textContent = v == null ? "—" : fmt(v) + " " + s.unit;
+  set("st-now", ys.at(-1)); set("st-min", ys.length ? Math.min(...ys) : null);
+  set("st-max", ys.length ? Math.max(...ys) : null); set("st-avg", ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : null);
+  if (view === "table") renderTable(pts.slice(-200).reverse());
+}
+
+function renderTable(rows) {
+  const s = sensorByKey(selected);
+  document.getElementById("tbl").innerHTML = `<tr><th>เวลา</th><th>${s.name} (${s.unit})</th></tr>` +
+    (rows.length ? rows.map(r => `<tr><td>${new Date(r.x).toLocaleString("th-TH")}</td><td>${fmt(r.y)}</td></tr>`).join("")
+                 : `<tr><td colspan="2" style="text-align:center;color:var(--muted)">ยังไม่มีข้อมูลในช่วงเวลานี้</td></tr>`);
+}
+function setView(v) {
+  view = v;
+  document.getElementById("v-chart").classList.toggle("on", v === "chart");
+  document.getElementById("v-table").classList.toggle("on", v === "table");
+  document.getElementById("chart-box").classList.toggle("hidden", v !== "chart");
+  document.getElementById("tbl-box").classList.toggle("hidden", v !== "table");
+  renderMain();
+}
+function selectSensor(k) {
+  selected = k;
+  document.querySelectorAll(".tile").forEach(t => t.classList.toggle("sel", t.id === "tile-" + k));
+  document.querySelectorAll("#sensor-seg button").forEach(b => b.classList.toggle("on", b.dataset.k === k));
+  renderMain();
+}
+
+function renderSparks() {
+  const from = Date.now() - 600000; // 10 นาทีล่าสุด
+  const recent = hist.filter(h => h.t >= from);
+  SENSORS.forEach(s => {
+    const pts = recent.filter(h => h[s.key] != null);
+    const c = sparks[s.key];
+    c.data.labels = pts.map(p => p.t); c.data.datasets[0].data = pts.map(p => p[s.key]);
+    c.update("none");
+    const vals = pts.map(p => p[s.key]);
+    if (vals.length > 1) {
+      const d = vals.at(-1) - vals[0];
+      document.getElementById("d-" + s.key).textContent = (d > 0 ? "▲ " : d < 0 ? "▼ " : "■ ") + fmt(Math.abs(d)) + " /10น.";
+      document.getElementById("r-" + s.key).textContent = fmt(Math.min(...vals)) + "–" + fmt(Math.max(...vals));
+    }
+  });
+}
+
+/* ================= MQTT ================= */
+let client;
+function connect() {
+  document.getElementById("topic-base").value = TOPIC_BASE;
+  client = mqtt.connect(BROKER, { clientId: "sf_web_" + Math.random().toString(16).slice(2, 10), reconnectPeriod: 3000, keepalive: 30 });
+  client.on("connect", () => { setConn(true); client.subscribe(T().status); log("เชื่อมต่อ Cloud แล้ว · subscribe " + T().status, "in"); });
+  client.on("reconnect", () => setConn(false, "กำลังเชื่อมต่อใหม่..."));
+  client.on("offline", () => setConn(false, "ออฟไลน์"));
+  client.on("error", e => log("MQTT error: " + e.message, "al"));
+  client.on("message", (topic, msg) => {
+    if (topic !== T().status) return;
+    try { onData(JSON.parse(msg.toString())); } catch (e) { log("JSON ผิดรูปแบบ: " + msg.toString().slice(0, 80), "al"); }
+  });
+}
+function setConn(ok, txt) {
+  const el = document.getElementById("conn");
+  el.classList.toggle("online", ok); el.classList.toggle("wait", !ok && !!txt);
+  document.getElementById("conn-txt").textContent = ok ? "Cloud: เชื่อมต่อแล้ว" : (txt || "ไม่ได้เชื่อมต่อ");
+}
+function changeTopic() {
+  const v = document.getElementById("topic-base").value.trim(); if (!v) return;
+  if (client) client.unsubscribe(T().status);
+  TOPIC_BASE = v; localStorage.setItem("sf_topic", v);
+  if (client?.connected) client.subscribe(T().status);
+  log("เปลี่ยน topic เป็น " + v, "out"); toast("เปลี่ยน topic แล้ว");
+}
+
+function sendCmd(cmd) {
+  if (demo) { demoApply(cmd); log("→ (จำลอง) " + cmd, "out"); return; }
+  if (!client?.connected) { toast("ยังไม่ได้เชื่อมต่อ Cloud"); return; }
+  client.publish(T().control, cmd);
+  log("→ " + cmd, "out");
+}
+function allOff() { ["led:off", "fan:off", "pump:off", "auto:off", "buzzer:off", "feed:close"].forEach((c, i) => setTimeout(() => sendCmd(c), i * 150)); toast("ส่งคำสั่งปิดทั้งหมดแล้ว"); }
+function sendThresholds() {
+  const cfg = { soil: +val("th-soil"), temp: +val("th-temp"), light: +val("th-light"), water: +val("th-water"), rain: +val("th-rain"), dist: +val("th-dist") };
+  localStorage.setItem("sf_th", JSON.stringify(cfg));
+  sendCmd("config:" + JSON.stringify(cfg)); toast("ส่งค่าเกณฑ์แล้ว"); renderMain();
+}
+
+/* ================= INCOMING DATA ================= */
+function onData(d) {
+  lastMsg = Date.now();
+  const pt = { t: lastMsg };
+  SENSORS.forEach(s => { if (d[s.key] != null && !isNaN(+d[s.key])) pt[s.key] = +d[s.key]; });
+  hist.push(pt);
+  if (hist.length > MAX_POINTS) hist.splice(0, hist.length - MAX_POINTS);
+  saveHistSoon();
+
+  SENSORS.forEach(s => {
+    const el = document.getElementById("v-" + s.key);
+    el.textContent = pt[s.key] != null ? fmt(pt[s.key]) : "--";
+    const bd = document.getElementById("bd-" + s.key);
+    const st = status(s, pt[s.key]);
+    bd.className = "badge " + st.cls; bd.textContent = st.txt || s.icon;
+  });
+  if (d.pir != null) {
+    document.getElementById("v-pir").textContent = d.pir ? "⚠ ตรวจพบ" : "ปกติ";
+    if (d.pir && !lastState.pir) { document.getElementById("pir-last").textContent = "ล่าสุด " + fmtTime(lastMsg); log("ตรวจพบการเคลื่อนไหว", "al"); }
+  }
+  setSw("led", d.led, "เปิดอยู่", "ปิด");
+  setSw("fan", d.fan, "กำลังทำงาน", "ปิด");
+  setSw("pump", d.pump, "กำลังรดน้ำ", "ปิด");
+  setSw("alarm", d.guard, "กำลังเฝ้าระวัง", "ปิดการเฝ้าระวัง");
+  setSw("auto", d.auto, "เปิด — บอร์ดควบคุมตามเกณฑ์", "ปิด — ควบคุมด้วยมือ");
+  if (d.servo != null) {
+    document.getElementById("s-servo").textContent = "มุม " + d.servo + "° · " + (d.servo < 120 ? "เปิด" : "ปิด");
+    if (document.activeElement?.id !== "servo-ang") { document.getElementById("servo-ang").value = d.servo; rv("servo-ang", "servo-ang-v", "°"); }
+  }
+  // alerts on transitions
+  SENSORS.forEach(s => { const st = status(s, pt[s.key]); if (st.cls !== "ok" && lastState["st_" + s.key] === "ok") log(s.name + ": " + st.txt + " (" + fmt(pt[s.key]) + s.unit + ")", "al"); lastState["st_" + s.key] = st.cls; });
+  lastState.pir = d.pir;
+
+  document.getElementById("last-upd").textContent = new Date(lastMsg).toLocaleTimeString("th-TH");
+  renderSparks(); renderMain();
+}
+function status(s, v) {
+  if (v == null) return { cls: "ok" };
+  if (s.key === "temp") { if (v >= 38) return { cls: "crit", txt: "ร้อนจัด" }; if (v >= +val("th-temp")) return { cls: "warn", txt: "ร้อน" }; }
+  if (s.key === "soil" && v < +val("th-soil")) return { cls: "warn", txt: "ดินแห้ง" };
+  if (s.key === "water" && v < +val("th-water")) return { cls: "crit", txt: "น้ำใกล้หมด" };
+  if (s.key === "rain" && v > +val("th-rain")) return { cls: "warn", txt: "ฝนตก" };
+  if (s.key === "light" && v < +val("th-light")) return { cls: "warn", txt: "มืด" };
+  if (s.key === "dist" && v > 0 && v <= +val("th-dist")) return { cls: "warn", txt: "มีวัตถุใกล้" };
+  return { cls: "ok" };
+}
+function setSw(k, state, on, off) {
+  if (state == null) return;
+  const b = !!(+state || state === true);
+  document.getElementById("sw-" + k).checked = b;
+  document.getElementById("s-" + k).textContent = b ? on : off;
+  if (lastState[k] != null && lastState[k] !== b) log((b ? "เปิด " : "ปิด ") + k, "in");
+  lastState[k] = b;
+}
+
+// device online watchdog
+setInterval(() => {
+  const el = document.getElementById("dev"), txt = document.getElementById("dev-txt");
+  const age = (Date.now() - lastMsg) / 1000;
+  el.classList.remove("online", "wait");
+  if (!lastMsg) { el.classList.add("wait"); txt.textContent = "รอข้อมูลจากบอร์ด"; }
+  else if (age < 15) { el.classList.add("online"); txt.textContent = demo ? "บอร์ดจำลอง" : "บอร์ดออนไลน์"; }
+  else txt.textContent = "บอร์ดเงียบ " + Math.round(age) + " วิ";
+  if (view === "chart" && mainChart) renderMain();
+}, 5000);
+
+/* ================= DEMO MODE ================= */
+const sim = { temp: 28, hum: 65, soil: 45, light: 60, water: 70, rain: 5, dist: 25, led: 0, fan: 0, pump: 0, auto: 0, guard: 0, servo: 160, pir: 0 };
+function toggleDemo() {
+  const b = document.getElementById("btn-demo");
+  if (demo) { clearInterval(demo); demo = null; b.textContent = "▶ โหมดจำลอง"; toast("ปิดโหมดจำลอง"); return; }
+  b.textContent = "■ หยุดจำลอง"; toast("โหมดจำลอง: ข้อมูลสุ่ม ไม่ได้ส่งไปบอร์ดจริง");
+  demo = setInterval(() => {
+    const j = (v, a, lo, hi) => Math.max(lo, Math.min(hi, v + (Math.random() - .5) * a));
+    sim.temp = j(sim.temp - (sim.fan ? .15 : -.03), .6, 18, 42); sim.hum = j(sim.hum, 1.5, 20, 95);
+    sim.soil = j(sim.soil - .25 + (sim.pump ? 3 : 0), 1, 0, 100); sim.light = j(sim.light, 4, 0, 100);
+    sim.water = j(sim.water - (sim.pump ? 1 : 0), .3, 0, 100); sim.rain = j(sim.rain, 3, 0, 100);
+    sim.dist = Math.random() < .05 ? 4 : j(sim.dist, 3, 8, 60); sim.pir = Math.random() < .04 ? 1 : 0;
+    if (sim.auto) { sim.pump = sim.soil < +val("th-soil") ? 1 : 0; sim.fan = sim.temp > +val("th-temp") ? 1 : 0; sim.led = sim.light < +val("th-light") ? 1 : 0; }
+    onData({ ...sim, temp: Math.round(sim.temp), hum: Math.round(sim.hum), soil: Math.round(sim.soil), light: Math.round(sim.light),
+             water: Math.round(sim.water), rain: Math.round(sim.rain), dist: Math.round(sim.dist) });
+  }, 2000);
+}
+function demoApply(cmd) {
+  const [k, v] = cmd.split(":");
+  if (["led", "fan", "pump", "auto", "guard"].includes(k)) sim[k] = v === "on" ? 1 : v === "off" ? 0 : +!sim[k];
+  if (k === "servo") sim.servo = +v;
+  if (k === "feed") sim.servo = v === "open" ? 80 : 160;
+  if (k === "water") { sim.pump = 1; setTimeout(() => sim.pump = 0, v * 1000); }
+}
+
+/* ================= UTIL ================= */
+function sensorByKey(k) { return SENSORS.find(s => s.key === k); }
+function val(id) { return document.getElementById(id).value; }
+function rv(id, out, suf) { document.getElementById(out).textContent = val(id) + suf; if (id.startsWith("th-")) renderMain(); }
+function fmt(v) { return v == null ? "--" : (Math.round(v * 10) / 10).toLocaleString("th-TH"); }
+function fmtTime(t) { const d = new Date(t); return rangeSec > 21600 ? d.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : d.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: rangeSec <= 300 ? "2-digit" : undefined }); }
+function hexA(hex, a) { const h = hex.replace("#", ""); const n = parseInt(h.length === 3 ? h.split("").map(c => c + c).join("") : h, 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; }
+function downsample(pts, n) { if (pts.length <= n) return pts; const step = pts.length / n, out = []; for (let i = 0; i < n; i++) { const a = Math.floor(i * step), b = Math.floor((i + 1) * step); let sum = 0; for (let j = a; j < b; j++) sum += pts[j].y; out.push({ x: pts[b - 1].x, y: sum / (b - a) }); } return out; }
+let saveT; function saveHistSoon() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(HIST_KEY, JSON.stringify(hist)); } catch (e) {} }, 3000); }
+function clearHistory() { if (!confirm("ล้างประวัติข้อมูลทั้งหมด?")) return; hist = []; localStorage.removeItem(HIST_KEY); renderSparks(); renderMain(); }
+function exportCSV() {
+  const head = ["time", ...SENSORS.map(s => s.key)];
+  const rows = hist.map(h => [new Date(h.t).toISOString(), ...SENSORS.map(s => h[s.key] ?? "")].join(","));
+  const blob = new Blob(["﻿" + head.join(",") + "\n" + rows.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "smartfarm_" + Date.now() + ".csv"; a.click();
+}
+function log(msg, cls = "") {
+  const el = document.getElementById("log");
+  el.insertAdjacentHTML("afterbegin", `<div><span class="tm">${new Date().toLocaleTimeString("th-TH")}</span><span class="${cls}">${msg.replace(/</g, "&lt;")}</span></div>`);
+  while (el.children.length > 150) el.lastChild.remove();
+}
+let toastT; function toast(m) { const t = document.getElementById("toast"); t.textContent = m; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 2200); }
+function toggleTheme() {
+  const r = document.documentElement; r.dataset.theme = r.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem("sf_theme", r.dataset.theme); rebuildCharts();
+}
+function rebuildCharts() { Object.values(sparks).forEach(c => c.destroy()); SENSORS.forEach(makeSpark); buildMain(); renderSparks(); renderMain(); }
+
+/* ================= INIT ================= */
+document.documentElement.dataset.theme = localStorage.getItem("sf_theme") || "dark";
+try { const th = JSON.parse(localStorage.getItem("sf_th") || "{}"); Object.entries(th).forEach(([k, v]) => { const el = document.getElementById("th-" + k); if (el) el.value = v; }); } catch (e) {}
+[["th-soil", "%"], ["th-temp", "°C"], ["th-light", "%"], ["th-water", "%"], ["th-rain", "%"], ["th-dist", " cm"]].forEach(([id, u]) => document.getElementById(id + "-v").textContent = val(id) + u);
+Chart.defaults.font.family = "Prompt, system-ui, sans-serif";
+SENSORS.forEach(makeSpark); buildMain(); selectSensor("temp"); renderSparks();
+connect();
+</script>
+</body>
+</html>
