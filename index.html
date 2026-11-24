@@ -119,6 +119,19 @@
   body.legacy button.v2only::after { display: none; }
   .fw-banner { background: var(--surface); border: 1px solid var(--serious); border-radius: 12px; padding: 10px 14px; font-size: .85rem; color: var(--ink-2); margin-bottom: 16px; }
   body:not(.legacy) .fw-banner { display: none; }
+  /* farm selector */
+  .farms { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .farm { cursor: pointer; padding: 12px 14px; transition: border-color .15s; }
+  .farm:hover { border-color: var(--muted); }
+  .farm.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .farm .f-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 500; }
+  .farm .f-head span:first-child { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .farm .f-vals { display: flex; gap: 10px; font-size: .78rem; color: var(--ink-2); margin-top: 6px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .farm .f-sub { font-size: .7rem; color: var(--muted); margin-top: 4px; }
+  .farm .dot { flex-shrink: 0; background: var(--muted); }
+  .farm .dot.on { background: var(--good); } .farm .dot.late { background: var(--critical); }
+  .farm.add { display: grid; place-items: center; color: var(--ink-2); font-size: .85rem; border-style: dashed; }
+  textarea { width: 100%; min-height: 140px; font: .85rem ui-monospace, Consolas, monospace; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); }
   input[type=text] { font: inherit; font-size: .82rem; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); }
 </style>
 </head>
@@ -128,7 +141,7 @@
   <header>
     <div>
       <h1>🌱 KS0567 Cloud Smart Farm</h1>
-      <div class="sub">ควบคุมผ่าน Cloud MQTT · อัปเดตล่าสุด <span id="last-upd">—</span></div>
+      <div class="sub">กำลังดู <b id="cur-name" style="color:var(--ink)">—</b> · <span id="cur-topic"></span> · อัปเดตล่าสุด <span id="last-upd">—</span></div>
     </div>
     <div class="hdr-right">
       <span id="conn" class="pill"><span class="dot"></span><span id="conn-txt">กำลังเชื่อมต่อ...</span></span>
@@ -137,6 +150,19 @@
       <button class="btn" onclick="toggleTheme()" title="สลับธีม">◐</button>
     </div>
   </header>
+
+  <!-- Farm selector -->
+  <div class="farms" id="farms"></div>
+  <div class="card section hidden" id="farm-mgr">
+    <h2>จัดการฟาร์ม</h2>
+    <div class="sub" style="margin-bottom:8px">หนึ่งบรรทัดต่อหนึ่งบอร์ด: <b>topic, ชื่อที่แสดง</b> — topic ต้องตรงกับ <code>TOPIC_BASE</code> ในโค้ดของบอร์ดนั้น</div>
+    <textarea id="farm-txt" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" onclick="saveFarms()">บันทึก</button>
+      <button class="btn" onclick="toggleMgr()">ยกเลิก</button>
+      <span class="sub">ลิงก์เปิดฟาร์มตรง: เติม <code>?farm=2</code> ท้าย URL</span>
+    </div>
+  </div>
 
   <div class="fw-banner" id="fw-banner">⚠ บอร์ดยังใช้เฟิร์มแวร์เดิม — สั่ง LED / พัดลม / ปั๊ม / Buzzer / Auto ได้ แต่ Servo, กันขโมย PIR, Ultrasonic และการตั้งค่าเกณฑ์ ต้องอัปโหลด <b>esp32_smartfarm_mqtt.ino</b> ลงบอร์ดก่อน</div>
 
@@ -294,7 +320,7 @@
     </div>
     <div class="card">
       <div class="toolbar" style="margin-bottom:6px"><h2 style="margin:0">บันทึกเหตุการณ์</h2>
-        <div class="row"><input type="text" id="topic-base" style="width:150px" title="MQTT topic prefix"><button class="btn" onclick="changeTopic()">เปลี่ยน</button></div>
+        <label class="small"><input type="checkbox" id="log-all" checked> ทุกฟาร์ม</label>
       </div>
       <div class="log" id="log"></div>
     </div>
@@ -305,28 +331,120 @@
 <script>
 /* ================= CONFIG ================= */
 const BROKER = "wss://broker.emqx.io:8084/mqtt";
-let TOPIC_BASE = localStorage.getItem("sf_topic") || "sbt_smartfarm_01";
-const T = () => ({ status: TOPIC_BASE + "/status", control: TOPIC_BASE + "/control" });
-const HIST_KEY = "sf_history_v2";
 const MAX_POINTS = 6000;
+const DEFAULT_FARMS = [1, 2, 3, 4, 5].map(n => ({ id: "sbt_smartfarm_0" + n, name: "ฟาร์ม " + n }));
+const DEFAULT_TH = { soil: 30, temp: 32, light: 20, water: 15, rain: 40, dist: 7 };
+const TH_UNITS = { soil: "%", temp: "°C", light: "%", water: "%", rain: "%", dist: " cm" };
+const topics = id => ({ status: id + "/status", control: id + "/control" });
 
 /* sensor definitions — color follows the sensor, never its position */
 const SENSORS = [
-  { key: "temp",  name: "อุณหภูมิอากาศ",     unit: "°C", icon: "🌡️", color: "--s-temp",  min: 0, max: 50,  th: "th-temp",  thDir: "above" },
-  { key: "hum",   name: "ความชื้นอากาศ",     unit: "%",  icon: "💨", color: "--s-hum",   min: 0, max: 100 },
-  { key: "soil",  name: "ความชื้นในดิน",      unit: "%",  icon: "🌱", color: "--s-soil",  min: 0, max: 100, th: "th-soil",  thDir: "below" },
-  { key: "light", name: "ความเข้มแสง",        unit: "%",  icon: "☀️", color: "--s-light", min: 0, max: 100, th: "th-light", thDir: "below" },
-  { key: "water", name: "ระดับน้ำในถัง",      unit: "%",  icon: "🪣", color: "--s-water", min: 0, max: 100, th: "th-water", thDir: "below" },
-  { key: "rain",  name: "น้ำฝน/ไอน้ำ",        unit: "%",  icon: "🌧️", color: "--s-rain",  min: 0, max: 100, th: "th-rain",  thDir: "above" },
-  { key: "dist",  name: "ระยะ (Ultrasonic)", unit: "cm", icon: "📏", color: "--s-dist",  min: 0, max: 100, th: "th-dist",  thDir: "below" },
+  { key: "temp",  name: "อุณหภูมิอากาศ",     unit: "°C", icon: "🌡️", color: "--s-temp",  th: "th-temp" },
+  { key: "hum",   name: "ความชื้นอากาศ",     unit: "%",  icon: "💨", color: "--s-hum" },
+  { key: "soil",  name: "ความชื้นในดิน",      unit: "%",  icon: "🌱", color: "--s-soil",  th: "th-soil" },
+  { key: "light", name: "ความเข้มแสง",        unit: "%",  icon: "☀️", color: "--s-light", th: "th-light" },
+  { key: "water", name: "ระดับน้ำในถัง",      unit: "%",  icon: "🪣", color: "--s-water", th: "th-water" },
+  { key: "rain",  name: "น้ำฝน/ไอน้ำ",        unit: "%",  icon: "🌧️", color: "--s-rain",  th: "th-rain" },
+  { key: "dist",  name: "ระยะ (Ultrasonic)", unit: "cm", icon: "📏", color: "--s-dist",  th: "th-dist" },
 ];
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
-/* ================= STATE ================= */
-let hist = [];
-try { hist = JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); } catch (e) { hist = []; }
-let selected = "temp", rangeSec = 1800, view = "chart", lastMsg = 0, demo = null, lastState = {};
+/* ================= FARM STATE ================= */
+function loadFarms() {
+  try { const f = JSON.parse(localStorage.getItem("sf_farms")); if (Array.isArray(f) && f.length) return f; } catch (e) {}
+  return DEFAULT_FARMS.slice();
+}
+let FARMS = loadFarms();
+const farms = {};   // id -> runtime state
+function F(id) {
+  if (!farms[id]) {
+    let h = [], th = null;
+    try { h = JSON.parse(localStorage.getItem("sf_hist_" + id) || "[]"); } catch (e) {}
+    try { th = JSON.parse(localStorage.getItem("sf_th_" + id) || "null"); } catch (e) {}
+    farms[id] = { hist: h, lastMsg: 0, fw: "legacy", fwKnown: false, dev: {}, last: null, ls: {}, pirLast: 0,
+                  th: { ...DEFAULT_TH, ...(th || {}) }, sim: newSim(), saveT: null };
+  }
+  return farms[id];
+}
+const farmName = id => (FARMS.find(f => f.id === id) || { name: id }).name;
+// migrate single-farm history from the previous version into farm 01
+(function migrate() {
+  const old = localStorage.getItem("sf_history_v2");
+  if (old && !localStorage.getItem("sf_hist_sbt_smartfarm_01")) localStorage.setItem("sf_hist_sbt_smartfarm_01", old);
+  localStorage.removeItem("sf_history_v2");
+  const oldTh = localStorage.getItem("sf_th");
+  if (oldTh && !localStorage.getItem("sf_th_sbt_smartfarm_01")) localStorage.setItem("sf_th_sbt_smartfarm_01", oldTh);
+})();
+
+function pickInitialFarm() {
+  const q = new URLSearchParams(location.search).get("farm");
+  if (q) {
+    if (/^\d+$/.test(q) && FARMS[+q - 1]) return FARMS[+q - 1].id;
+    if (FARMS.some(f => f.id === q)) return q;
+  }
+  const saved = localStorage.getItem("sf_cur");
+  return FARMS.some(f => f.id === saved) ? saved : FARMS[0].id;
+}
+let curId = pickInitialFarm();
+const C = () => F(curId);
+
+let selected = "temp", rangeSec = 1800, view = "chart", demo = null;
 const sparks = {};
+
+/* ================= FARM BAR ================= */
+function buildFarmBar() {
+  const el = document.getElementById("farms");
+  el.innerHTML = FARMS.map((f, i) => `
+    <div class="card farm" id="farm-${i}" data-id="${f.id}" tabindex="0">
+      <div class="f-head"><span><span class="dot" id="fd-${i}"></span>${esc(f.name)}</span><span class="badge ok" id="fb-${i}"></span></div>
+      <div class="f-vals" id="fv-${i}">ยังไม่มีข้อมูล</div>
+      <div class="f-sub" id="fs-${i}">${esc(f.id)}</div>
+    </div>`).join("") + `<div class="card farm add" onclick="toggleMgr()" tabindex="0">⚙ จัดการฟาร์ม</div>`;
+  el.querySelectorAll(".farm[data-id]").forEach(c => c.onclick = () => selectFarm(c.dataset.id));
+  FARMS.forEach(f => renderFarmCard(f.id));
+  markSelectedFarm();
+}
+function renderFarmCard(id) {
+  const i = FARMS.findIndex(f => f.id === id); if (i < 0) return;
+  const f = F(id), d = f.last;
+  const age = (Date.now() - f.lastMsg) / 1000;
+  document.getElementById("fd-" + i).className = "dot" + (!f.lastMsg ? "" : age < 15 ? " on" : " late");
+  if (d) {
+    document.getElementById("fv-" + i).innerHTML = `🌡️ ${fmt(d.temp)}°  🌱 ${fmt(d.soil)}%  🪣 ${fmt(d.water)}%`;
+    const alerts = SENSORS.filter(s => status(s, d[s.key], f.th).cls !== "ok").length;
+    const b = document.getElementById("fb-" + i);
+    b.className = "badge " + (alerts ? "warn" : "ok"); b.textContent = alerts ? "⚠ " + alerts : (f.fw === "v2" ? "" : "FW เดิม");
+  }
+  document.getElementById("fs-" + i).textContent = !f.lastMsg ? id : age < 15 ? "ออนไลน์ · " + id : "เงียบ " + fmtAge(age) + " · " + id;
+}
+function markSelectedFarm() {
+  document.querySelectorAll(".farm[data-id]").forEach(c => c.classList.toggle("sel", c.dataset.id === curId));
+  document.getElementById("cur-name").textContent = farmName(curId);
+  document.getElementById("cur-topic").textContent = curId;
+}
+function selectFarm(id) {
+  curId = id; localStorage.setItem("sf_cur", id);
+  const i = FARMS.findIndex(f => f.id === id);
+  const url = new URL(location.href); url.searchParams.set("farm", i + 1); window.history.replaceState(null, "", url);
+  loadThresholdSliders();
+  markSelectedFarm(); renderUI();
+}
+function toggleMgr() {
+  const m = document.getElementById("farm-mgr");
+  m.classList.toggle("hidden");
+  document.getElementById("farm-txt").value = FARMS.map(f => f.id + ", " + f.name).join("\n");
+}
+function saveFarms() {
+  const list = document.getElementById("farm-txt").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => {
+    const [id, ...rest] = l.split(","); return { id: id.trim(), name: (rest.join(",").trim() || id.trim()) };
+  }).filter(f => /^[\w\-\/]+$/.test(f.id) && !f.id.includes("#") && !f.id.includes("+"));
+  if (!list.length) { toast("ต้องมีอย่างน้อย 1 ฟาร์ม"); return; }
+  if (client?.connected) client.unsubscribe(FARMS.map(f => topics(f.id).status));
+  FARMS = list; localStorage.setItem("sf_farms", JSON.stringify(FARMS));
+  if (client?.connected) client.subscribe(FARMS.map(f => topics(f.id).status));
+  if (!FARMS.some(f => f.id === curId)) curId = FARMS[0].id;
+  buildFarmBar(); selectFarm(curId); toggleMgr(); toast("บันทึกรายชื่อฟาร์มแล้ว");
+}
 
 /* ================= TILES ================= */
 const tilesEl = document.getElementById("tiles");
@@ -341,7 +459,6 @@ SENSORS.forEach(s => {
     </div>`);
   sensorSeg.insertAdjacentHTML("beforeend", `<button data-k="${s.key}">${s.icon} ${s.name}</button>`);
 });
-// PIR tile (binary)
 tilesEl.insertAdjacentHTML("beforeend", `
   <div class="card tile" style="cursor:default">
     <div class="t-head"><span>การเคลื่อนไหว (PIR)</span><span class="badge ok">🚶</span></div>
@@ -357,8 +474,7 @@ document.getElementById("range-seg").addEventListener("click", e => {
 });
 
 function makeSpark(s) {
-  const ctx = document.getElementById("sp-" + s.key);
-  sparks[s.key] = new Chart(ctx, {
+  sparks[s.key] = new Chart(document.getElementById("sp-" + s.key), {
     type: "line",
     data: { labels: [], datasets: [{ data: [], borderColor: css(s.color), borderWidth: 2, pointRadius: 0, tension: .35, fill: true,
       backgroundColor: hexA(css(s.color), .15) }] },
@@ -426,27 +542,26 @@ function buildMain() {
 function renderMain() {
   const s = sensorByKey(selected); const color = css(s.color);
   const now = Date.now(), from = now - rangeSec * 1000;
-  const pts = hist.filter(h => h.t >= from && h[s.key] != null).map(h => ({ x: h.t, y: h[s.key] }));
-  const data = downsample(pts, 500);
+  const pts = C().hist.filter(h => h.t >= from && h[s.key] != null).map(h => ({ x: h.t, y: h[s.key] }));
   const ds = mainChart.data.datasets[0];
-  ds.data = data; ds.borderColor = color; ds.pointHoverBackgroundColor = color;
+  ds.data = downsample(pts, 500); ds.borderColor = color; ds.pointHoverBackgroundColor = color;
   const g = mainChart.ctx.createLinearGradient(0, 0, 0, mainChart.height || 300);
   g.addColorStop(0, hexA(color, .28)); g.addColorStop(1, hexA(color, 0));
   ds.backgroundColor = g;
-  mainChart.options.scales.x.min = from; mainChart.options.scales.x.max = now;
-  if (s.key === "temp" || s.key === "dist") { delete mainChart.options.scales.y.min; delete mainChart.options.scales.y.max; mainChart.options.scales.y.suggestedMin = s.key === "temp" ? 15 : 0; mainChart.options.scales.y.suggestedMax = s.key === "temp" ? 40 : 30; }
-  else { mainChart.options.scales.y.min = 0; mainChart.options.scales.y.max = 100; }
+  const sc = mainChart.options.scales;
+  sc.x.min = from; sc.x.max = now;
+  if (s.key === "temp" || s.key === "dist") { delete sc.y.min; delete sc.y.max; sc.y.suggestedMin = s.key === "temp" ? 15 : 0; sc.y.suggestedMax = s.key === "temp" ? 40 : 30; }
+  else { sc.y.min = 0; sc.y.max = 100; }
   mainChart.options.plugins.threshold = s.th ? { value: +val(s.th), unit: s.unit } : {};
   mainChart.update("none");
 
-  document.getElementById("chart-title").textContent = s.icon + " " + s.name;
+  document.getElementById("chart-title").textContent = s.icon + " " + s.name + " · " + farmName(curId);
   const ys = pts.map(p => p.y);
   const set = (id, v) => document.getElementById(id).textContent = v == null ? "—" : fmt(v) + " " + s.unit;
   set("st-now", ys.at(-1)); set("st-min", ys.length ? Math.min(...ys) : null);
   set("st-max", ys.length ? Math.max(...ys) : null); set("st-avg", ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : null);
   if (view === "table") renderTable(pts.slice(-200).reverse());
 }
-
 function renderTable(rows) {
   const s = sensorByKey(selected);
   document.getElementById("tbl").innerHTML = `<tr><th>เวลา</th><th>${s.name} (${s.unit})</th></tr>` +
@@ -467,36 +582,37 @@ function selectSensor(k) {
   document.querySelectorAll("#sensor-seg button").forEach(b => b.classList.toggle("on", b.dataset.k === k));
   renderMain();
 }
-
 function renderSparks() {
-  const from = Date.now() - 600000; // 10 นาทีล่าสุด
-  const recent = hist.filter(h => h.t >= from);
+  const recent = C().hist.filter(h => h.t >= Date.now() - 600000); // 10 นาทีล่าสุด
   SENSORS.forEach(s => {
     const pts = recent.filter(h => h[s.key] != null);
     const c = sparks[s.key];
     c.data.labels = pts.map(p => p.t); c.data.datasets[0].data = pts.map(p => p[s.key]);
     c.update("none");
     const vals = pts.map(p => p[s.key]);
-    if (vals.length > 1) {
-      const d = vals.at(-1) - vals[0];
-      document.getElementById("d-" + s.key).textContent = (d > 0 ? "▲ " : d < 0 ? "▼ " : "■ ") + fmt(Math.abs(d)) + " /10น.";
-      document.getElementById("r-" + s.key).textContent = fmt(Math.min(...vals)) + "–" + fmt(Math.max(...vals));
-    }
+    document.getElementById("d-" + s.key).textContent = vals.length > 1
+      ? ((vals.at(-1) - vals[0]) > 0 ? "▲ " : (vals.at(-1) - vals[0]) < 0 ? "▼ " : "■ ") + fmt(Math.abs(vals.at(-1) - vals[0])) + " /10น." : " ";
+    document.getElementById("r-" + s.key).textContent = vals.length > 1 ? fmt(Math.min(...vals)) + "–" + fmt(Math.max(...vals)) : "";
   });
 }
 
 /* ================= MQTT ================= */
 let client;
 function connect() {
-  document.getElementById("topic-base").value = TOPIC_BASE;
   client = mqtt.connect(BROKER, { clientId: "sf_web_" + Math.random().toString(16).slice(2, 10), reconnectPeriod: 3000, keepalive: 30 });
-  client.on("connect", () => { setConn(true); client.subscribe(T().status); log("เชื่อมต่อ Cloud แล้ว · subscribe " + T().status, "in"); });
+  client.on("connect", () => {
+    setConn(true);
+    client.subscribe(FARMS.map(f => topics(f.id).status));
+    log("เชื่อมต่อ Cloud แล้ว · subscribe " + FARMS.length + " ฟาร์ม", "in");
+  });
   client.on("reconnect", () => setConn(false, "กำลังเชื่อมต่อใหม่..."));
   client.on("offline", () => setConn(false, "ออฟไลน์"));
   client.on("error", e => log("MQTT error: " + e.message, "al"));
   client.on("message", (topic, msg) => {
-    if (topic !== T().status) return;
-    try { onData(JSON.parse(msg.toString())); } catch (e) { log("JSON ผิดรูปแบบ: " + msg.toString().slice(0, 80), "al"); }
+    if (!topic.endsWith("/status")) return;
+    const id = topic.slice(0, -"/status".length);
+    if (!FARMS.some(f => f.id === id)) return;
+    try { onData(id, JSON.parse(msg.toString())); } catch (e) { log(farmName(id) + ": JSON ผิดรูปแบบ", "al", id); }
   });
 }
 function setConn(ok, txt) {
@@ -504,149 +620,157 @@ function setConn(ok, txt) {
   el.classList.toggle("online", ok); el.classList.toggle("wait", !ok && !!txt);
   document.getElementById("conn-txt").textContent = ok ? "Cloud: เชื่อมต่อแล้ว" : (txt || "ไม่ได้เชื่อมต่อ");
 }
-function changeTopic() {
-  const v = document.getElementById("topic-base").value.trim(); if (!v) return;
-  if (client) client.unsubscribe(T().status);
-  TOPIC_BASE = v; localStorage.setItem("sf_topic", v);
-  if (client?.connected) client.subscribe(T().status);
-  log("เปลี่ยน topic เป็น " + v, "out"); toast("เปลี่ยน topic แล้ว");
-}
 
-/* firmware detection: the original board sketch only understands toggle words
-   ("led","fan","pump","auto","buzzer"); the new sketch (esp32_smartfarm_mqtt.ino)
-   reports "servo"/"guard" in its status and understands "led:on" etc. */
-let fw = "legacy";          // assume the old sketch until a v2 status arrives
-const devState = {};        // last on/off reported by the board
-function translateLegacy(cmd) {
+/* firmware detection: the original sketch only understands toggle words
+   ("led","fan","pump","auto","buzzer"); the new sketch reports "servo"/"guard"
+   in its status and understands "led:on" etc. — decided per farm. */
+function translateLegacy(id, cmd) {
+  const dev = F(id).dev;
   const [k, arg] = cmd.split(":");
   if (["led", "fan", "pump", "auto"].includes(k)) {
     if (arg === "on" || arg === "off") {
       const want = arg === "on";
-      if (devState[k] === want) return [];          // already in that state
-      devState[k] = want;                            // optimistic, resynced by next status
-      return [k];
+      if (dev[k] === want) return [];
+      dev[k] = want; return [k];
     }
     return [k];
   }
   if (k === "water") {
     const sec = Math.max(1, +arg || 3);
-    setTimeout(() => { if (devState.pump) publishRaw("pump"), devState.pump = false; }, sec * 1000);
-    if (devState.pump) return [];
-    devState.pump = true; return ["pump"];
+    setTimeout(() => { if (dev.pump) { publishRaw(id, "pump"); dev.pump = false; } }, sec * 1000);
+    if (dev.pump) return [];
+    dev.pump = true; return ["pump"];
   }
   if (k === "buzzer" && arg === "off") return [];
   if (k === "buzzer" || k === "alarm" || k === "music") return ["buzzer"];
-  return null;                                        // not supported by old firmware
+  return null;
 }
-function publishRaw(c) { client.publish(T().control, c); log("→ " + c, "out"); }
-function sendCmd(cmd) {
-  if (demo) { demoApply(cmd); log("→ (จำลอง) " + cmd, "out"); return; }
+function publishRaw(id, c) { client.publish(topics(id).control, c); log(farmName(id) + " → " + c, "out", id); }
+function sendCmd(cmd, id = curId) {
+  if (demo) { demoApply(id, cmd); log(farmName(id) + " → (จำลอง) " + cmd, "out", id); return; }
   if (!client?.connected) { toast("ยังไม่ได้เชื่อมต่อ Cloud"); resyncSwitches(); return; }
-  if (fw === "v2") { publishRaw(cmd); return; }
-  const out = translateLegacy(cmd);
-  if (out === null) { toast("คำสั่งนี้ต้องอัปโหลดเฟิร์มแวร์ใหม่ (esp32_smartfarm_mqtt.ino)"); resyncSwitches(); return; }
-  out.forEach((c, i) => setTimeout(() => publishRaw(c), i * 200));
+  if (F(id).fw === "v2") { publishRaw(id, cmd); return; }
+  const out = translateLegacy(id, cmd);
+  if (out === null) { toast(farmName(id) + ": คำสั่งนี้ต้องอัปโหลดเฟิร์มแวร์ใหม่"); resyncSwitches(); return; }
+  out.forEach((c, i) => setTimeout(() => publishRaw(id, c), i * 200));
 }
 function resyncSwitches() {
-  ["led", "fan", "pump", "auto"].forEach(k => { if (devState[k] != null) document.getElementById("sw-" + k).checked = devState[k]; });
-  document.getElementById("sw-alarm").checked = !!devState.guard;
+  const dev = C().dev;
+  ["led", "fan", "pump", "auto"].forEach(k => { document.getElementById("sw-" + k).checked = !!dev[k]; });
+  document.getElementById("sw-alarm").checked = !!dev.guard;
 }
-function allOff() { ["led:off", "fan:off", "pump:off", "auto:off", "buzzer:off", "feed:close"].forEach((c, i) => setTimeout(() => sendCmd(c), i * 150)); toast("ส่งคำสั่งปิดทั้งหมดแล้ว"); }
+function allOff() { ["led:off", "fan:off", "pump:off", "auto:off", "buzzer:off", "feed:close"].forEach((c, i) => setTimeout(() => sendCmd(c), i * 150)); toast("ส่งคำสั่งปิดทั้งหมดแล้ว · " + farmName(curId)); }
 function sendThresholds() {
-  const cfg = { soil: +val("th-soil"), temp: +val("th-temp"), light: +val("th-light"), water: +val("th-water"), rain: +val("th-rain"), dist: +val("th-dist") };
-  localStorage.setItem("sf_th", JSON.stringify(cfg));
-  sendCmd("config:" + JSON.stringify(cfg)); toast("ส่งค่าเกณฑ์แล้ว"); renderMain();
+  sendCmd("config:" + JSON.stringify(C().th)); toast("ส่งค่าเกณฑ์ไปที่ " + farmName(curId) + " แล้ว"); renderMain();
 }
 
 /* ================= INCOMING DATA ================= */
-function onData(d) {
-  lastMsg = Date.now();
+function onData(id, d) {
+  const f = F(id), name = farmName(id);
+  f.lastMsg = Date.now();
   const newFw = ("servo" in d || "guard" in d) ? "v2" : "legacy";
-  if (newFw !== fw) log("ตรวจพบเฟิร์มแวร์บอร์ด: " + (newFw === "v2" ? "ใหม่ (รองรับครบ)" : "เดิม (ควบคุมได้บางส่วน)"), "in");
-  fw = newFw; document.body.classList.toggle("legacy", fw === "legacy");
-  ["led", "fan", "pump", "auto", "guard"].forEach(k => { if (d[k] != null) devState[k] = !!(+d[k] || d[k] === true); });
-  const pt = { t: lastMsg };
+  if (!f.fwKnown || newFw !== f.fw) log(name + ": เฟิร์มแวร์" + (newFw === "v2" ? "ใหม่ (รองรับครบ)" : "เดิม (ควบคุมได้บางส่วน)"), "in", id);
+  f.fw = newFw; f.fwKnown = true;
+  ["led", "fan", "pump", "auto", "guard"].forEach(k => {
+    if (d[k] == null) return;
+    const b = !!(+d[k] || d[k] === true);
+    if (f.ls[k] != null && f.ls[k] !== b) log(name + ": " + (b ? "เปิด " : "ปิด ") + k, "in", id);
+    f.ls[k] = b; f.dev[k] = b;
+  });
+  const pt = { t: f.lastMsg };
   SENSORS.forEach(s => { if (d[s.key] != null && !isNaN(+d[s.key])) pt[s.key] = +d[s.key]; });
-  hist.push(pt);
-  if (hist.length > MAX_POINTS) hist.splice(0, hist.length - MAX_POINTS);
-  saveHistSoon();
-
+  f.hist.push(pt);
+  if (f.hist.length > MAX_POINTS) f.hist.splice(0, f.hist.length - MAX_POINTS);
+  saveHistSoon(id);
   SENSORS.forEach(s => {
-    const el = document.getElementById("v-" + s.key);
-    el.textContent = pt[s.key] != null ? fmt(pt[s.key]) : "--";
-    const bd = document.getElementById("bd-" + s.key);
-    const st = status(s, pt[s.key]);
+    const st = status(s, pt[s.key], f.th);
+    if (st.cls !== "ok" && f.ls["st_" + s.key] === "ok") log(name + ": " + s.name + " " + st.txt + " (" + fmt(pt[s.key]) + s.unit + ")", "al", id);
+    f.ls["st_" + s.key] = st.cls;
+  });
+  if (d.pir && !f.ls.pir) { f.pirLast = f.lastMsg; log(name + ": ตรวจพบการเคลื่อนไหว", "al", id); }
+  f.ls.pir = d.pir;
+  f.last = d;
+  renderFarmCard(id);
+  if (id === curId) renderUI();
+}
+function renderUI() {
+  const f = C(), d = f.last || {};
+  document.body.classList.toggle("legacy", f.fwKnown && f.fw === "legacy");
+  SENSORS.forEach(s => {
+    const v = d[s.key] != null && !isNaN(+d[s.key]) ? +d[s.key] : null;
+    document.getElementById("v-" + s.key).textContent = v != null ? fmt(v) : "--";
+    const st = status(s, v, f.th), bd = document.getElementById("bd-" + s.key);
     bd.className = "badge " + st.cls; bd.textContent = st.txt || s.icon;
   });
-  if (d.pir != null) {
-    document.getElementById("v-pir").textContent = d.pir ? "⚠ ตรวจพบ" : "ปกติ";
-    if (d.pir && !lastState.pir) { document.getElementById("pir-last").textContent = "ล่าสุด " + fmtTime(lastMsg); log("ตรวจพบการเคลื่อนไหว", "al"); }
-  }
+  document.getElementById("v-pir").textContent = d.pir == null ? "--" : d.pir ? "⚠ ตรวจพบ" : "ปกติ";
+  document.getElementById("pir-last").textContent = f.pirLast ? "ล่าสุด " + new Date(f.pirLast).toLocaleTimeString("th-TH") : "ยังไม่พบ";
   setSw("led", d.led, "เปิดอยู่", "ปิด");
   setSw("fan", d.fan, "กำลังทำงาน", "ปิด");
   setSw("pump", d.pump, "กำลังรดน้ำ", "ปิด");
   setSw("alarm", d.guard, "กำลังเฝ้าระวัง", "ปิดการเฝ้าระวัง");
   setSw("auto", d.auto, "เปิด — บอร์ดควบคุมตามเกณฑ์", "ปิด — ควบคุมด้วยมือ");
-  if (d.servo != null) {
-    document.getElementById("s-servo").textContent = "มุม " + d.servo + "° · " + (d.servo < 120 ? "เปิด" : "ปิด");
-    if (document.activeElement?.id !== "servo-ang") { document.getElementById("servo-ang").value = d.servo; rv("servo-ang", "servo-ang-v", "°"); }
-  }
-  // alerts on transitions
-  SENSORS.forEach(s => { const st = status(s, pt[s.key]); if (st.cls !== "ok" && lastState["st_" + s.key] === "ok") log(s.name + ": " + st.txt + " (" + fmt(pt[s.key]) + s.unit + ")", "al"); lastState["st_" + s.key] = st.cls; });
-  lastState.pir = d.pir;
-
-  document.getElementById("last-upd").textContent = new Date(lastMsg).toLocaleTimeString("th-TH");
+  document.getElementById("s-servo").textContent = d.servo != null ? "มุม " + d.servo + "° · " + (d.servo < 120 ? "เปิด" : "ปิด") : "—";
+  if (d.servo != null && document.activeElement?.id !== "servo-ang") { document.getElementById("servo-ang").value = d.servo; rv("servo-ang", "servo-ang-v", "°"); }
+  document.getElementById("last-upd").textContent = f.lastMsg ? new Date(f.lastMsg).toLocaleTimeString("th-TH") : "—";
+  updateDevPill();
   renderSparks(); renderMain();
 }
-function status(s, v) {
+function status(s, v, th) {
   if (v == null) return { cls: "ok" };
-  if (s.key === "temp") { if (v >= 38) return { cls: "crit", txt: "ร้อนจัด" }; if (v >= +val("th-temp")) return { cls: "warn", txt: "ร้อน" }; }
-  if (s.key === "soil" && v < +val("th-soil")) return { cls: "warn", txt: "ดินแห้ง" };
-  if (s.key === "water" && v < +val("th-water")) return { cls: "crit", txt: "น้ำใกล้หมด" };
-  if (s.key === "rain" && v > +val("th-rain")) return { cls: "warn", txt: "ฝนตก" };
-  if (s.key === "light" && v < +val("th-light")) return { cls: "warn", txt: "มืด" };
-  if (s.key === "dist" && v > 0 && v <= +val("th-dist")) return { cls: "warn", txt: "มีวัตถุใกล้" };
+  if (s.key === "temp") { if (v >= 38) return { cls: "crit", txt: "ร้อนจัด" }; if (v >= th.temp) return { cls: "warn", txt: "ร้อน" }; }
+  if (s.key === "soil" && v < th.soil) return { cls: "warn", txt: "ดินแห้ง" };
+  if (s.key === "water" && v < th.water) return { cls: "crit", txt: "น้ำใกล้หมด" };
+  if (s.key === "rain" && v > th.rain) return { cls: "warn", txt: "ฝนตก" };
+  if (s.key === "light" && v < th.light) return { cls: "warn", txt: "มืด" };
+  if (s.key === "dist" && v > 0 && v <= th.dist) return { cls: "warn", txt: "มีวัตถุใกล้" };
   return { cls: "ok" };
 }
 function setSw(k, state, on, off) {
-  if (state == null) return;
-  const b = !!(+state || state === true);
+  const b = state != null && !!(+state || state === true);
   document.getElementById("sw-" + k).checked = b;
-  document.getElementById("s-" + k).textContent = b ? on : off;
-  if (lastState[k] != null && lastState[k] !== b) log((b ? "เปิด " : "ปิด ") + k, "in");
-  lastState[k] = b;
+  document.getElementById("s-" + k).textContent = state == null ? "—" : b ? on : off;
+}
+function updateDevPill() {
+  const f = C(), el = document.getElementById("dev"), txt = document.getElementById("dev-txt");
+  const age = (Date.now() - f.lastMsg) / 1000;
+  el.classList.remove("online", "wait");
+  if (!f.lastMsg) { el.classList.add("wait"); txt.textContent = farmName(curId) + ": รอข้อมูล"; }
+  else if (age < 15) { el.classList.add("online"); txt.textContent = farmName(curId) + (demo ? ": จำลอง" : ": ออนไลน์"); }
+  else txt.textContent = farmName(curId) + ": เงียบ " + fmtAge(age);
+}
+setInterval(() => { updateDevPill(); FARMS.forEach(f => renderFarmCard(f.id)); if (view === "chart" && mainChart) renderMain(); }, 5000);
+
+/* ================= THRESHOLDS (per farm) ================= */
+function loadThresholdSliders() {
+  const th = C().th;
+  Object.keys(DEFAULT_TH).forEach(k => { document.getElementById("th-" + k).value = th[k]; document.getElementById("th-" + k + "-v").textContent = th[k] + TH_UNITS[k]; });
 }
 
-// device online watchdog
-setInterval(() => {
-  const el = document.getElementById("dev"), txt = document.getElementById("dev-txt");
-  const age = (Date.now() - lastMsg) / 1000;
-  el.classList.remove("online", "wait");
-  if (!lastMsg) { el.classList.add("wait"); txt.textContent = "รอข้อมูลจากบอร์ด"; }
-  else if (age < 15) { el.classList.add("online"); txt.textContent = demo ? "บอร์ดจำลอง" : "บอร์ดออนไลน์"; }
-  else txt.textContent = "บอร์ดเงียบ " + Math.round(age) + " วิ";
-  if (view === "chart" && mainChart) renderMain();
-}, 5000);
-
 /* ================= DEMO MODE ================= */
-const sim = { temp: 28, hum: 65, soil: 45, light: 60, water: 70, rain: 5, dist: 25, led: 0, fan: 0, pump: 0, auto: 0, guard: 0, servo: 160, pir: 0 };
+function newSim() {
+  const r = (a, b) => a + Math.random() * (b - a);
+  return { temp: r(24, 34), hum: r(45, 80), soil: r(20, 70), light: r(30, 90), water: r(20, 90), rain: r(0, 20), dist: r(15, 40),
+           led: 0, fan: 0, pump: 0, auto: 0, guard: 0, servo: 160, pir: 0 };
+}
 function toggleDemo() {
   const b = document.getElementById("btn-demo");
   if (demo) { clearInterval(demo); demo = null; b.textContent = "▶ โหมดจำลอง"; toast("ปิดโหมดจำลอง"); return; }
-  b.textContent = "■ หยุดจำลอง"; toast("โหมดจำลอง: ข้อมูลสุ่ม ไม่ได้ส่งไปบอร์ดจริง");
-  demo = setInterval(() => {
+  b.textContent = "■ หยุดจำลอง"; toast("โหมดจำลอง: ข้อมูลสุ่มทุกฟาร์ม ไม่ได้ส่งไปบอร์ดจริง");
+  const step = () => FARMS.forEach(fm => {
+    const f = F(fm.id), sim = f.sim, th = f.th;
     const j = (v, a, lo, hi) => Math.max(lo, Math.min(hi, v + (Math.random() - .5) * a));
     sim.temp = j(sim.temp - (sim.fan ? .15 : -.03), .6, 18, 42); sim.hum = j(sim.hum, 1.5, 20, 95);
     sim.soil = j(sim.soil - .25 + (sim.pump ? 3 : 0), 1, 0, 100); sim.light = j(sim.light, 4, 0, 100);
     sim.water = j(sim.water - (sim.pump ? 1 : 0), .3, 0, 100); sim.rain = j(sim.rain, 3, 0, 100);
-    sim.dist = Math.random() < .05 ? 4 : j(sim.dist, 3, 8, 60); sim.pir = Math.random() < .04 ? 1 : 0;
-    if (sim.auto) { sim.pump = sim.soil < +val("th-soil") ? 1 : 0; sim.fan = sim.temp > +val("th-temp") ? 1 : 0; sim.led = sim.light < +val("th-light") ? 1 : 0; }
-    onData({ ...sim, temp: Math.round(sim.temp), hum: Math.round(sim.hum), soil: Math.round(sim.soil), light: Math.round(sim.light),
-             water: Math.round(sim.water), rain: Math.round(sim.rain), dist: Math.round(sim.dist) });
-  }, 2000);
+    sim.dist = Math.random() < .05 ? 4 : j(sim.dist, 3, 8, 60); sim.pir = Math.random() < .03 ? 1 : 0;
+    if (sim.auto) { sim.pump = sim.soil < th.soil ? 1 : 0; sim.fan = sim.temp > th.temp ? 1 : 0; sim.led = sim.light < th.light ? 1 : 0; }
+    const R = Math.round;
+    onData(fm.id, { ...sim, temp: R(sim.temp), hum: R(sim.hum), soil: R(sim.soil), light: R(sim.light), water: R(sim.water), rain: R(sim.rain), dist: R(sim.dist) });
+  });
+  step(); demo = setInterval(step, 2000);
 }
-function demoApply(cmd) {
-  const [k, v] = cmd.split(":");
+function demoApply(id, cmd) {
+  const sim = F(id).sim; const [k, v] = cmd.split(":");
   if (["led", "fan", "pump", "auto", "guard"].includes(k)) sim[k] = v === "on" ? 1 : v === "off" ? 0 : +!sim[k];
   if (k === "servo") sim.servo = +v;
   if (k === "feed") sim.servo = v === "open" ? 80 : 160;
@@ -656,37 +780,52 @@ function demoApply(cmd) {
 /* ================= UTIL ================= */
 function sensorByKey(k) { return SENSORS.find(s => s.key === k); }
 function val(id) { return document.getElementById(id).value; }
-function rv(id, out, suf) { document.getElementById(out).textContent = val(id) + suf; if (id.startsWith("th-")) renderMain(); }
-function fmt(v) { return v == null ? "--" : (Math.round(v * 10) / 10).toLocaleString("th-TH"); }
-function fmtTime(t) { const d = new Date(t); return rangeSec > 21600 ? d.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : d.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: rangeSec <= 300 ? "2-digit" : undefined }); }
+function rv(id, out, suf) {
+  document.getElementById(out).textContent = val(id) + suf;
+  if (id.startsWith("th-")) {
+    const k = id.slice(3); C().th[k] = +val(id);
+    localStorage.setItem("sf_th_" + curId, JSON.stringify(C().th));
+    renderMain(); renderFarmCard(curId);
+  }
+}
+function fmt(v) { return v == null || isNaN(+v) ? "--" : (Math.round(v * 10) / 10).toLocaleString("th-TH"); }
+function fmtAge(s) { return s < 90 ? Math.round(s) + " วิ" : s < 5400 ? Math.round(s / 60) + " นาที" : Math.round(s / 3600) + " ชม."; }
+function fmtTime(t) { const d = new Date(t); return d.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: rangeSec <= 300 ? "2-digit" : undefined }); }
 function hexA(hex, a) { const h = hex.replace("#", ""); const n = parseInt(h.length === 3 ? h.split("").map(c => c + c).join("") : h, 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; }
 function downsample(pts, n) { if (pts.length <= n) return pts; const step = pts.length / n, out = []; for (let i = 0; i < n; i++) { const a = Math.floor(i * step), b = Math.floor((i + 1) * step); let sum = 0; for (let j = a; j < b; j++) sum += pts[j].y; out.push({ x: pts[b - 1].x, y: sum / (b - a) }); } return out; }
-let saveT; function saveHistSoon() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(HIST_KEY, JSON.stringify(hist)); } catch (e) {} }, 3000); }
-function clearHistory() { if (!confirm("ล้างประวัติข้อมูลทั้งหมด?")) return; hist = []; localStorage.removeItem(HIST_KEY); renderSparks(); renderMain(); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function saveHistSoon(id) {
+  const f = F(id); clearTimeout(f.saveT);
+  f.saveT = setTimeout(() => { try { localStorage.setItem("sf_hist_" + id, JSON.stringify(f.hist)); } catch (e) { f.hist.splice(0, f.hist.length / 2); } }, 3000);
+}
+function clearHistory() {
+  if (!confirm("ล้างประวัติข้อมูลของ " + farmName(curId) + "?")) return;
+  C().hist = []; localStorage.removeItem("sf_hist_" + curId); renderSparks(); renderMain();
+}
 function exportCSV() {
   const head = ["time", ...SENSORS.map(s => s.key)];
-  const rows = hist.map(h => [new Date(h.t).toISOString(), ...SENSORS.map(s => h[s.key] ?? "")].join(","));
+  const rows = C().hist.map(h => [new Date(h.t).toISOString(), ...SENSORS.map(s => h[s.key] ?? "")].join(","));
   const blob = new Blob(["﻿" + head.join(",") + "\n" + rows.join("\n")], { type: "text/csv" });
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "smartfarm_" + Date.now() + ".csv"; a.click();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = curId + "_" + Date.now() + ".csv"; a.click();
 }
-function log(msg, cls = "") {
+function log(msg, cls = "", id = null) {
+  if (id && id !== curId && !document.getElementById("log-all").checked) return;
   const el = document.getElementById("log");
-  el.insertAdjacentHTML("afterbegin", `<div><span class="tm">${new Date().toLocaleTimeString("th-TH")}</span><span class="${cls}">${msg.replace(/</g, "&lt;")}</span></div>`);
-  while (el.children.length > 150) el.lastChild.remove();
+  el.insertAdjacentHTML("afterbegin", `<div><span class="tm">${new Date().toLocaleTimeString("th-TH")}</span><span class="${cls}">${esc(msg)}</span></div>`);
+  while (el.children.length > 200) el.lastChild.remove();
 }
 let toastT; function toast(m) { const t = document.getElementById("toast"); t.textContent = m; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 2200); }
 function toggleTheme() {
   const r = document.documentElement; r.dataset.theme = r.dataset.theme === "dark" ? "light" : "dark";
   localStorage.setItem("sf_theme", r.dataset.theme); rebuildCharts();
 }
-function rebuildCharts() { Object.values(sparks).forEach(c => c.destroy()); SENSORS.forEach(makeSpark); buildMain(); renderSparks(); renderMain(); }
+function rebuildCharts() { Object.values(sparks).forEach(c => c.destroy()); SENSORS.forEach(makeSpark); buildMain(); renderUI(); }
 
 /* ================= INIT ================= */
 document.documentElement.dataset.theme = localStorage.getItem("sf_theme") || "dark";
-try { const th = JSON.parse(localStorage.getItem("sf_th") || "{}"); Object.entries(th).forEach(([k, v]) => { const el = document.getElementById("th-" + k); if (el) el.value = v; }); } catch (e) {}
-[["th-soil", "%"], ["th-temp", "°C"], ["th-light", "%"], ["th-water", "%"], ["th-rain", "%"], ["th-dist", " cm"]].forEach(([id, u]) => document.getElementById(id + "-v").textContent = val(id) + u);
 Chart.defaults.font.family = "Prompt, system-ui, sans-serif";
-SENSORS.forEach(makeSpark); buildMain(); selectSensor("temp"); renderSparks();
+SENSORS.forEach(makeSpark); buildMain();
+buildFarmBar(); selectFarm(curId); selectSensor("temp");
 connect();
 </script>
 </body>
