@@ -114,6 +114,11 @@
   table.data th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--surface); }
   .tbl-wrap { max-height: 300px; overflow: auto; }
   .hidden { display: none !important; }
+  body.legacy .v2only { opacity: .45; }
+  body.legacy .v2only::after { content: "ต้องอัปโหลดเฟิร์มแวร์ใหม่"; display: block; font-size: .72rem; color: var(--serious); }
+  body.legacy button.v2only::after { display: none; }
+  .fw-banner { background: var(--surface); border: 1px solid var(--serious); border-radius: 12px; padding: 10px 14px; font-size: .85rem; color: var(--ink-2); margin-bottom: 16px; }
+  body:not(.legacy) .fw-banner { display: none; }
   input[type=text] { font: inherit; font-size: .82rem; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); }
 </style>
 </head>
@@ -132,6 +137,8 @@
       <button class="btn" onclick="toggleTheme()" title="สลับธีม">◐</button>
     </div>
   </header>
+
+  <div class="fw-banner" id="fw-banner">⚠ บอร์ดยังใช้เฟิร์มแวร์เดิม — สั่ง LED / พัดลม / ปั๊ม / Buzzer / Auto ได้ แต่ Servo, กันขโมย PIR, Ultrasonic และการตั้งค่าเกณฑ์ ต้องอัปโหลด <b>esp32_smartfarm_mqtt.ino</b> ลงบอร์ดก่อน</div>
 
   <!-- Sensor tiles -->
   <div class="section">
@@ -203,7 +210,7 @@
         </div>
       </div>
 
-      <div class="card ctrl">
+      <div class="card ctrl v2only">
         <div class="ctrl-top">
           <div class="ctrl-name"><span class="ico">🥣</span><div>ฝากล่องอาหาร (Servo)<div class="ctrl-state" id="s-servo">—</div></div></div>
           <div class="row">
@@ -230,7 +237,7 @@
         </div>
       </div>
 
-      <div class="card ctrl">
+      <div class="card ctrl v2only">
         <div class="ctrl-top">
           <div class="ctrl-name"><span class="ico">🛡️</span><div>สัญญาณกันขโมย (PIR)<div class="ctrl-state" id="s-alarm">ปิดการเฝ้าระวัง</div></div></div>
           <label class="switch"><input type="checkbox" id="sw-alarm" onchange="sendCmd('guard:'+(this.checked?'on':'off'))"><span class="slider"></span></label>
@@ -281,7 +288,7 @@
         </div>
       </div>
       <div class="row" style="margin-top:14px">
-        <button class="btn primary" onclick="sendThresholds()">ส่งค่าไปที่บอร์ด</button>
+        <button class="btn primary v2only" onclick="sendThresholds()">ส่งค่าไปที่บอร์ด</button>
         <span class="sub">ค่าเหล่านี้ใช้ทั้งเป็นเกณฑ์ Auto บนบอร์ด และเส้นเกณฑ์บนกราฟ</span>
       </div>
     </div>
@@ -505,11 +512,44 @@ function changeTopic() {
   log("เปลี่ยน topic เป็น " + v, "out"); toast("เปลี่ยน topic แล้ว");
 }
 
+/* firmware detection: the original board sketch only understands toggle words
+   ("led","fan","pump","auto","buzzer"); the new sketch (esp32_smartfarm_mqtt.ino)
+   reports "servo"/"guard" in its status and understands "led:on" etc. */
+let fw = "legacy";          // assume the old sketch until a v2 status arrives
+const devState = {};        // last on/off reported by the board
+function translateLegacy(cmd) {
+  const [k, arg] = cmd.split(":");
+  if (["led", "fan", "pump", "auto"].includes(k)) {
+    if (arg === "on" || arg === "off") {
+      const want = arg === "on";
+      if (devState[k] === want) return [];          // already in that state
+      devState[k] = want;                            // optimistic, resynced by next status
+      return [k];
+    }
+    return [k];
+  }
+  if (k === "water") {
+    const sec = Math.max(1, +arg || 3);
+    setTimeout(() => { if (devState.pump) publishRaw("pump"), devState.pump = false; }, sec * 1000);
+    if (devState.pump) return [];
+    devState.pump = true; return ["pump"];
+  }
+  if (k === "buzzer" && arg === "off") return [];
+  if (k === "buzzer" || k === "alarm" || k === "music") return ["buzzer"];
+  return null;                                        // not supported by old firmware
+}
+function publishRaw(c) { client.publish(T().control, c); log("→ " + c, "out"); }
 function sendCmd(cmd) {
   if (demo) { demoApply(cmd); log("→ (จำลอง) " + cmd, "out"); return; }
-  if (!client?.connected) { toast("ยังไม่ได้เชื่อมต่อ Cloud"); return; }
-  client.publish(T().control, cmd);
-  log("→ " + cmd, "out");
+  if (!client?.connected) { toast("ยังไม่ได้เชื่อมต่อ Cloud"); resyncSwitches(); return; }
+  if (fw === "v2") { publishRaw(cmd); return; }
+  const out = translateLegacy(cmd);
+  if (out === null) { toast("คำสั่งนี้ต้องอัปโหลดเฟิร์มแวร์ใหม่ (esp32_smartfarm_mqtt.ino)"); resyncSwitches(); return; }
+  out.forEach((c, i) => setTimeout(() => publishRaw(c), i * 200));
+}
+function resyncSwitches() {
+  ["led", "fan", "pump", "auto"].forEach(k => { if (devState[k] != null) document.getElementById("sw-" + k).checked = devState[k]; });
+  document.getElementById("sw-alarm").checked = !!devState.guard;
 }
 function allOff() { ["led:off", "fan:off", "pump:off", "auto:off", "buzzer:off", "feed:close"].forEach((c, i) => setTimeout(() => sendCmd(c), i * 150)); toast("ส่งคำสั่งปิดทั้งหมดแล้ว"); }
 function sendThresholds() {
@@ -521,6 +561,10 @@ function sendThresholds() {
 /* ================= INCOMING DATA ================= */
 function onData(d) {
   lastMsg = Date.now();
+  const newFw = ("servo" in d || "guard" in d) ? "v2" : "legacy";
+  if (newFw !== fw) log("ตรวจพบเฟิร์มแวร์บอร์ด: " + (newFw === "v2" ? "ใหม่ (รองรับครบ)" : "เดิม (ควบคุมได้บางส่วน)"), "in");
+  fw = newFw; document.body.classList.toggle("legacy", fw === "legacy");
+  ["led", "fan", "pump", "auto", "guard"].forEach(k => { if (d[k] != null) devState[k] = !!(+d[k] || d[k] === true); });
   const pt = { t: lastMsg };
   SENSORS.forEach(s => { if (d[s.key] != null && !isNaN(+d[s.key])) pt[s.key] = +d[s.key]; });
   hist.push(pt);
